@@ -1,0 +1,252 @@
+#!/bin/sh
+
+set -e
+
+if [ "x$BASH_VERSION" != "x" ] ||
+    [ "x$ZSH_VERSION" != "x" ]
+then
+    [ "x$ZSH_VERSION" != "x" ] && emulate ksh
+    # shellcheck disable=SC3040
+    set -o pipefail
+fi
+
+EPD_VIRTUAL_NAME=${EPD_VIRTUAL_NAME-".php-dbg"}
+
+if [ -t 1 ]
+then
+    yellow='\033[33;1m'
+    green='\033[32;1m'
+    red='\033[31;1m'
+    clear='\033[0m'
+else
+    no_progress="--no-progress"
+fi
+phpver=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION.".".PHP_RELEASE_VERSION;')
+
+usage()
+{
+    cat <<EOF
+Enable or disable php debug symbols and gdb installation for alpine
+Usage:
+    $1 enable [--force-gdbinit]
+    $1 disable [--keep] [--force-gdbinit]
+    $1 status
+    enable:
+        Install gdb and php{7,8}-dbg package. Fetch sources and generate
+        gdbinit for root. if gdbinit is provided, and --force-gdbinit
+        is specified, overwrite it, otherwise not modify it.
+    disable:
+        Remove gdb and php{7,8}-dbg package. Keep sources if "--keep" is provided,
+        otherwise remove them. if gdbinit is modified, and --force-gdbinit
+        is specified, remove it, otherwise not modify it.
+    status:
+        Show status
+EOF
+}
+
+parse_arg()
+{
+    arg=$1
+    shift
+    while [ "${1+1}" = "1" ]
+    do
+        if [ "$arg" = "$1" ]
+        then
+            return 0
+        fi
+        shift
+    done
+    return 1
+}
+
+packages()
+{
+    apk info -e "${EPD_VIRTUAL_NAME}" 2>>/tmp/nonce- >>/tmp/nonce && installed=1 || installed=0
+    case "$1-$installed" in
+        enable-0)
+            echo "Installing packages for php ${phpver}"
+            apk add $no_progress \
+                --virtual "${EPD_VIRTUAL_NAME}" \
+                gdb \
+                php"${phpver%%.*}"-dbg~"${phpver%.*}"
+            ;;
+        disable-1)
+            echo "Removing packages"
+            apk del $no_progress "${EPD_VIRTUAL_NAME}"
+            ;;
+        status-1)
+            # shellcheck disable=SC2059
+            printf "packages: ${green}Enabled${clear}\n"
+            ;;
+        status-0)
+            # shellcheck disable=SC2059
+            printf "packages: ${red}Disabled${clear}\n"
+            ;;
+    esac
+}
+
+fetch_php()
+{
+    for x in xz-bzip2 bz2-gzip gz
+    do
+        fn="php-${phpver}.tar.${x%%-*}"
+        echo "Try download ${fn}"
+        if curl -sfSL --retry 3 \
+            -o "/usr/src/${fn}" \
+            "https://www.php.net/distributions/${fn}"
+        then
+            return 0
+        else
+            rm "/usr/src/${fn}" 2>>/tmp/nonce || :
+            pkg=${x##*-}
+            if [ "x$pkg" != "x" ]
+            then
+                echo "Failed to download ${fn}, try $pkg version"
+                apk add $no_progress --virtual "${EPD_VIRTUAL_NAME}-sourcefetch" $pkg
+            fi
+            continue
+        fi
+    done
+    return 1
+}
+
+patch_php()
+{
+    cd "/usr/src/php-${phpver}"
+    commit=$(
+        php -r 'preg_match("/\nP:php'"${phpver%%.*}"'\n(?s:.+?)c:(?<commit>[a-fA-F0-9]+)/",file_get_contents("/lib/apk/db/installed"),$''m);echo $''m["commit"];'
+    )
+    echo Fetching and patch list
+    curl -sfSL "https://git.alpinelinux.org/aports/plain/community/php${phpver%%.*}?id=${commit}" |
+    grep -o '>[a-zA-Z0-9_-]\+\.patch<' | grep -o '[^<>]\+' |
+    while read -r patch_name
+    do
+        echo Fetching and apply "$patch_name"
+        curl -sfSL "https://git.alpinelinux.org/aports/plain/community/php${phpver%%.*}/${patch_name}?id=${commit}" |
+            patch -p 1
+    done
+}
+
+gen_gdbinit()
+{
+    if [ ! -f "/usr/src/php-${phpver}/.mygdbinit" ]
+    then
+        echo "Generating gdbinit"
+        mkdir -p "/usr/src/php-${phpver}"
+        dbgsrcpath=$(strings "/usr/lib/debug/usr/bin/php${phpver%%.*}.debug" | grep -e 'main/main.c')
+        dbgsrcpath=${dbgsrcpath%"/main/main.c"}
+        echo "set substitute-path ${dbgsrcpath} /usr/src/php-${phpver}" > "/usr/src/php-${phpver}/.mygdbinit"
+        echo "source /usr/src/php-${phpver}/.gdbinit" >> "/usr/src/php-${phpver}/.mygdbinit"
+    fi
+}
+
+sources()
+{
+    [ -d "/usr/src/php-$phpver" ] && enabled=1 || enabled=0
+    if parse_arg "--keep" "$@"
+    then
+        keep_source=1
+    fi
+    case "$1-$enabled" in
+        enable-0)
+            echo "Fetching php ${phpver} source"
+            apk add $no_progress --virtual "${EPD_VIRTUAL_NAME}-sourcefetch" \
+                patch \
+                curl \
+                tar \
+                binutils \
+                xz
+            mkdir -p /usr/src/
+            fetch_php
+            tar xf "/usr/src/$fn" -C /usr/src
+            rm "/usr/src/$fn"
+            patch_php
+            gen_gdbinit
+            apk del $no_progress "${EPD_VIRTUAL_NAME}-sourcefetch"
+            ;;
+        disable-1)
+            if [ "$keep_source" = "1" ]
+            then 
+                echo "Keep php source"
+            else
+                echo "Removing php source"
+                rm -r "/usr/src/php-$phpver"
+            fi
+            ;;
+        status-1)
+            # shellcheck disable=SC2059
+            printf "sources: ${green}Enabled${clear}\n"
+            ;;
+        status-0)
+            # shellcheck disable=SC2059
+            printf "sources: ${red}Disabled${clear}\n"
+            ;;
+    esac
+}
+
+gdbinit()
+{
+    
+    if [ ! -f "/root/.gdbinit" ]
+    then
+        enabled=0
+    else
+        if cmp -s "/root/.gdbinit" "/usr/src/php-${phpver}/.mygdbinit"
+        then
+            enabled=1
+        else
+            enabled=2
+            if parse_arg "--force-gdbinit" "$@"
+            then
+                enabled=3
+            fi
+        fi
+    fi
+    case "$1-$enabled" in
+        enable-0|enable-3)
+            echo "Writing gdbinit"
+            cp "/usr/src/php-${phpver}/.mygdbinit" "/root/.gdbinit"
+            ;;
+        disable-1|disable-3)
+            echo "Removing gdbinit"
+            rm "/root/.gdbinit"
+            ;;
+        disable-2)
+            # shellcheck disable=SC2059
+            printf "${yellow}Waring${clear} /root/.gdbinit is modified, skipping remove it\n"
+            ;;
+        enable-2)
+            # shellcheck disable=SC2059
+            printf "${yellow}Waring${clear} /root/.gdbinit is modified, skipping touch it\n"
+            ;;
+        status-2|status-3)
+            # shellcheck disable=SC2059
+            printf "gdbinit: ${yellow}Modified${clear}\n"
+            ;;
+        status-1)
+            # shellcheck disable=SC2059
+            printf "gdbinit: ${green}Enabled${clear}\n"
+            ;;
+        status-0)
+            # shellcheck disable=SC2059
+            printf "gdbinit: ${red}Disabled${clear}\n"
+            ;;
+    esac
+}
+
+case $1 in
+    enable|status)
+        packages "$@"
+        sources "$@"
+        gdbinit "$@"
+        ;;
+    disable)
+        packages "$@"
+        gdbinit "$@"
+        sources "$@"
+        ;;
+    *)
+        usage "$0"
+        exit 1
+        ;;
+esac

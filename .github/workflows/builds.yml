@@ -1,0 +1,21 @@
+name: Automatic build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  prepare:
+    name: Prepare task lists
+    runs-on: ubuntu-latest
+    outputs:
+      tasks: ${{steps.gen.outputs.tasks}}
+    steps:
+      - name: Checkout self
+        uses: actions/checkout@v2
+      - name: Generate task lists
+        shell: bash
+        id: gen
+        run: |
+          php hyperf-docker list all output.json
+          printf "::set-output name=tasks::"
+          cat output.json
