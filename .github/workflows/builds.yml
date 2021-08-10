@@ -1,7 +1,17 @@
-name: Automatic build
+name: Build images
 
 on:
+  schedule:
+    - cron: '33 2 * * *'
   workflow_dispatch:
+    inputs:
+      skip:
+        description: 'Skip image uploading, any string to skip it, empty string to upload it'
+        default: 'skip'
+        required: true
+
+env:
+  GITHUB_TOKEN: ${{github.token}}
 
 jobs:
   prepare:
@@ -16,6 +26,124 @@ jobs:
         shell: bash
         id: gen
         run: |
-          php hyperf-docker list all output.json
+          php hyperf-docker.php list all output.json
           printf "::set-output name=tasks::"
           cat output.json
+          echo
+          cat output.json | jq
+  build-php:
+    name: Build image ${{matrix.data.imagename}}
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        data: ${{ fromJSON(needs.prepare.outputs.tasks).php }}
+      max-parallel: 6
+    steps:
+      - name: Checkout self
+        uses: actions/checkout@v2
+      - name: Write hash file
+        id: hash
+        shell: bash
+        run: |
+          echo '${{ matrix.data.phpver }}' >> hash.txt
+          echo '${{ matrix.data.distrover }}' >> hash.txt
+          echo '${{ matrix.data.distro }}' >> hash.txt
+          echo '${{ matrix.data.base }}' >> hash.txt
+          echo '${{ matrix.data.aliases }}' >> hash.txt
+          image='${{matrix.data.imagename}}'
+          tag=${image##hyperf/php:}
+          echo "::set-output name=tag::${tag}"
+      - name: Base Image Cache
+        id: cache
+        uses: actions/cache@v2
+        with:
+          key: phpcache-v2-${{hashFiles('hash.txt')}}
+          path: |
+            hash.txt
+            ${{steps.hash.outputs.tag}}.tar.zst
+      - name: Build image
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        id: build
+        run: |
+          image='${{matrix.data.imagename}}'
+          echo '${{toJSON(matrix.data)}}' | php hyperf-docker.php buildjson
+          docker save $image | zstd > ${image##hyperf/php:}.tar.zst
+      - name: Upload image
+        if: ${{ steps.cache.outputs.cache-hit != 'true' && (github.event_name == 'schedule' || github.event.inputs.skip == '') }}
+        shell: bash
+        run: |
+          image='${{matrix.data.imagename}}'
+          image=${image##:*}
+          docker login -u ${{secrets.DOCKERHUB_USERNAME}} -p ${{secrets.DOCKERHUB_TOKEN}}
+          docker push $image --all-tags
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{steps.hash.outputs.tag}}
+          path: |
+            ${{steps.hash.outputs.tag}}.tar.zst
+  build-ext:
+    name: Build image ${{matrix.data.imagename}}
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - build-php
+    strategy:
+      fail-fast: false
+      matrix:
+        data: ${{ fromJSON(needs.prepare.outputs.tasks).ext }}
+      max-parallel: 4
+    steps:
+      - name: Checkout self
+        uses: actions/checkout@v2
+      - name: Write hash file
+        shell: bash
+        id: hash
+        run: |
+          echo '${{ matrix.data.phpver }}' >> hash.txt
+          echo '${{ matrix.data.distrover }}' >> hash.txt
+          echo '${{ matrix.data.distro }}' >> hash.txt
+          echo '${{ matrix.data.base }}' >> hash.txt
+          echo '${{ matrix.data.aliases }}' >> hash.txt
+          echo '${{ matrix.data.require }}' >> hash.txt
+          echo '${{ matrix.data.ext }}' >> hash.txt
+          echo '${{ matrix.data.extver }}' >> hash.txt
+          echo '${{ matrix.data.composer }}' >> hash.txt
+          image='${{matrix.data.imagename}}'
+          tag=${image##hyperf/php:}
+          echo "::set-output name=tag::${tag}"
+      - name: Pseudo Cache
+        id: cache
+        uses: actions/cache@v2
+        with:
+          key: extcache-v1-${{hashFiles('hash.txt')}}
+          path: |
+            hash.txt
+      - name: Download artifact
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/download-artifact@v2
+        with:
+          name: ${{ matrix.data.require }}
+      - name: Build image
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          image='${{matrix.data.imagename}}'
+          cat ${{ matrix.data.require }}.tar.zst | zstd -d | docker load
+          echo '${{toJSON(matrix.data)}}' | php hyperf-docker.php buildjson
+      - name: Upload image
+        if: ${{ steps.cache.outputs.cache-hit != 'true' && (github.event_name == 'schedule' || github.event.inputs.skip == '') }}
+        shell: bash
+        run: |
+          image='${{matrix.data.imagename}}'
+          image=${image##:*}
+          docker login -u ${{secrets.DOCKERHUB_USERNAME}} -p ${{secrets.DOCKERHUB_TOKEN}}
+          # docker have no such feature: upload a specified subset of tags:
+          # see https://github.com/docker/cli/issues/267#issuecomment-858787827
+          # they think api requests is more expensive than implement the feature
+          # so we have to upload all tags including builder (+ about 500M per image set)
+          docker push $image --all-tags

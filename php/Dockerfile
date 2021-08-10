@@ -9,12 +9,11 @@ ARG ALPINE_VERSION
 
 FROM alpine:$ALPINE_VERSION
 
-ARG ALPINE_VERSION
 ARG PHP_VERSION
 
 LABEL maintainer="Hyperf Developers <group@hyperf.io>" version="2.0" license="MIT"
 
-ADD debuggable_php /usr/local/bin/
+COPY debuggable_php /usr/local/bin/
 
 RUN set -eo pipefail ; \
     # setup suffix

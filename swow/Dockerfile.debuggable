@@ -1,4 +1,4 @@
-# hyperf/swoole image
+# hyperf/swow debuggable image
 #
 # @link     https://www.hyperf.io
 # @document https://doc.hyperf.io
@@ -7,9 +7,9 @@
 
 ARG ALPINE_VERSION
 ARG PHP_VERSION
-ARG SWOOLE_VERSION
+ARG SWOW_VERSION
 
-FROM hyperf/swoole:${SWOOLE_VERSION}-php-${PHP_VERSION}-alpine-${ALPINE_VERSION}-builder as builder
+FROM hyperf/swow:${SWOW_VERSION}-php-${PHP_VERSION}-alpine-${ALPINE_VERSION}-builder as builder
 
 FROM hyperf/php:${PHP_VERSION}-alpine-${ALPINE_VERSION}
 
@@ -20,10 +20,7 @@ ARG COMPOSER_VERSION
 RUN set -eo pipefail ; \
     suffix=$(php -r 'echo PHP_MAJOR_VERSION;'); \
     # runtime libraries
-    { apk add --no-cache "brotli-libs" || \
-    apk add --no-cache "brotli" ; } && \
     apk add --no-cache \
-        libstdc++ \
         zlib \
         openssl \
     && \
@@ -40,5 +37,5 @@ RUN set -eo pipefail ; \
     composer -V && \
     printf "\033[42;37m Build Completed :).\033[0m\n"
 
-# install swoole
+# install swow
 COPY --from=builder /tmp/withdebug /
